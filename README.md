@@ -1,62 +1,66 @@
-# macOS Thunderbolt Wi-Fi Toggle (DevOps Mini Projekt)
+# macOS Wi-Fi Auto Toggle
 
 > 🧠 Autor: **Lukáš Františák**  
-> 🎯 Cíl: Automatizovat přepínání mezi **Wi-Fi** a **10G Thunderbolt síťovou kartou QNAP** na MacBooku
-> a postupně se na tom naučit DevOps přístup – automatizaci, monitoring a práci s Dockerem.
+> 🎯 Cíl: Automatizovat přepínání mezi **Wi-Fi** a **10G Thunderbolt síťovou kartou QNAP** na MacBooku  
+> a využít tento reálný problém jako osobní DevOps projekt pro učení automatizace, monitoringu a tvorby infrastruktury.
 
 ---
 
 ## 💡 Proč tento projekt vznikl
 
-Na MacBooku používám externí **10G síťovou kartu QNAP připojenou přes Thunderbolt**, kterou využívám pro vysokorychlostní připojení k NASu.  
-macOS ale i při zapojení karty často používá připojení přes **Wi-Fi**, což snižuje propustnost a stabilitu spojení.
+V práci používám **MacBook připojený k NASu** přes **externí 10G QNAP Thunderbolt síťovou kartu**.  
+Přestože mám v macOS nastavenou prioritu rozhraní, systém stále často využívá **Wi-Fi** namísto rychlejšího kabelového připojení.
 
-Cílem projektu je, aby se:
-- při připojení Thunderbolt karty **Wi-Fi automaticky vypnula**,
-- a při jejím odpojení **Wi-Fi zase zapnula zpět**.
+To vede ke snížení propustnosti a vyšším latencím při práci s NASem.  
+Cílem je tedy vytvořit **chytrý Python skript**, který bude automaticky sledovat síťové rozhraní a přepínat Wi-Fi podle potřeby.
 
-Zároveň chci, aby skript rozpoznal, že se nacházím v kanceláři (např. podle SSID `Marketing 5.0GHz`)  
-a mimo kancelář zbytečně neběžel – šetřil výkon i energii.
+Současně chci tento projekt rozvíjet jako **studijní platformu** pro DevOps – naučit se na něm:
+- práci s Gitem a GitHubem,  
+- logování a observabilitu (Prometheus + Grafana),  
+- nasazování pomocí Docker Compose,  
+- a CI/CD workflow s GitHub Actions.
 
 ---
 
 ## 🧰 Co skript aktuálně umí
 
-- Sleduje všechna síťová rozhraní (`en*`) a pozná, kdy je aktivní drát (Thunderbolt/Ethernet).  
-- Při aktivním drátu **vypne Wi-Fi**, po odpojení **Wi-Fi znovu zapne**.  
-- Pozná, jestli jsem v kanceláři (SSID `Marketing 5.0GHz`).  
-- Mimo kancelář přejde do „spánkového“ režimu (idle).  
-- Umí běžet i jako **LaunchDaemon** – automaticky po startu systému.  
-- Zapisuje logy do konzole s informacemi o stavech připojení.
+✅ Sleduje všechna síťová rozhraní (`en*`) a rozpozná, kdy je aktivní „drát“ (Thunderbolt/Ethernet).  
+✅ Pokud je drát aktivní → **Wi-Fi se vypne**.  
+✅ Pokud se drát odpojí → **Wi-Fi se automaticky zapne**.  
+✅ Umí rozpoznat, zda jsem v kanceláři podle SSID (`Marketing 5.0GHz`).  
+✅ Mimo kancelář přejde do „spánkového režimu“ (šetří výkon).  
+✅ Lze ho spustit automaticky po startu systému pomocí **LaunchDaemona** nebo **LaunchAgenta**.  
 
 ---
 
-## ⚙️ Stav projektu
+## ⚙️ Aktuální stav projektu
 
-Projekt je v **rané fázi vývoje**.  
-V tuto chvíli funguje základní logika přepínání Wi-Fi ↔ Thunderbolt.  
-Další části jako **Prometheus / Grafana**, **notifikace** nebo **CI/CD** zatím nejsou implementovány –  
-jsou v plánu jako další krok v rámci mého učení DevOps nástrojů.
+Projekt je v **rané, ale funkční fázi**.  
+Základní logika přepínání Wi-Fi ↔ Thunderbolt funguje spolehlivě.  
+Kód je napsán v Pythonu s důrazem na čitelnost, komentáře a možnost dalšího rozšiřování.
+
+V této fázi se projekt používá **na lokálním MacBooku** bez externích závislostí.  
+Následující vývoj se zaměří na přidání observability, logování a monitoringu.
 
 ---
 
 ## 🚀 Jak skript spustit
 
-1️⃣ Vytvoř složku pro skript:
+1️⃣ Vytvoř složku pro projekt (pokud ji ještě nemáš):
 ```bash
-mkdir -p ~/Documents/Scripts
+mkdir -p ~/Dev/macos-wifi-auto-toggle
 ```
 
-2️⃣ Ulož soubor `monitor_thunderbolt_wifi.py` do této složky.
+2️⃣ Ulož do ní soubory:
+- `monitor_thunderbolt_wifi.py`
+- `README.md`
 
-3️⃣ Spusť ho ručně v terminálu:
+3️⃣ Spusť skript ručně v terminálu:
 ```bash
-sudo /usr/bin/python3 ~/Documents/Scripts/monitor_thunderbolt_wifi.py
+sudo /usr/bin/python3 ~/Dev/macos-wifi-auto-toggle/monitor_thunderbolt_wifi.py
 ```
 
-Skript vypíše informace o aktuálních rozhraních a začne hlídat stav připojení.
-
-4️⃣ (Volitelné) Spuštění automaticky po startu systému  
+4️⃣ (Volitelné) Spuštění po startu systému:  
 Vytvoř LaunchDaemon nebo LaunchAgent podle instrukcí v kódu (soubor `.plist`).
 
 ---
@@ -72,32 +76,46 @@ Vytvoř LaunchDaemon nebo LaunchAgent podle instrukcí v kódu (soubor `.plist`)
 
 ---
 
-## 📋 Plány do budoucna
+## 🧭 Plány do budoucna
 
-- Přidat `/metrics` endpoint (Prometheus format)
-- Vytvořit Docker Compose stack s Prometheem a Grafanou
-- Přidat systémové notifikace (macOS Notification Center)
-- Logování do souboru + rotace
-- Unit testy a GitHub CI linting
-- Možnost distribuce skriptu mezi kolegy
+### 🔹 Krátkodobé cíle
+- Přidat **notifikace** do Notification Center při přepnutí sítě.  
+- Doplnit **rotující logování** (`logging` + `RotatingFileHandler`).  
+- Umožnit zapnutí debug režimu pomocí argumentu (`--debug`).  
+- Přidat konfiguraci přes `.env` nebo `config.yml`.  
+
+### 🔹 Střednědobé cíle
+- Přidat **/metrics endpoint** (Prometheus format).  
+- Vytvořit **Docker Compose stack** s Prometheem a Grafanou.  
+- Zaznamenávat stav a změny do **Prometheus metrik** (`tbwifi_*`).  
+- Vytvořit **dashboard v Grafaně** pro vizualizaci přepínání, uptime a chyb.  
+
+### 🔹 Dlouhodobé cíle
+- Přidat **GitHub Actions workflow** pro lintování a testy.  
+- Nasazení do balíčku (`.pkg` nebo Homebrew tap).  
+- Verzi pro **distribuci v kanceláři mezi kolegy** – auto-updaty, centrální monitoring.  
+- Integrace s **Grafana Loki** pro logování.  
+- Vytvoření **CLI nástroje** (`tbwifi` příkaz).  
+- Možnost zasílat stav do **Slacku nebo e-mailu** při chybě.  
 
 ---
 
-## 🧠 Co si na tom chci vyzkoušet
+## 🧠 Co si chci na tomto projektu vyzkoušet
 
-- Základy DevOps přístupu (observability, logging, monitoring)  
-- Integraci Prometheus / Grafana  
-- Práci s `launchd` (macOS služby)  
-- Docker Compose workflow  
-- Automatizaci jednoduchých systémových úloh pomocí Pythonu
+- Prakticky pochopit DevOps cyklus: **build → monitor → iterate**.  
+- Psaní spolehlivých skriptů s idempotentním chováním.  
+- Práci s `launchd` a službami na macOS.  
+- Integraci Pythonu s nástroji pro observabilitu (Prometheus, Grafana).  
+- Vytvoření přehledného `docker-compose` stacku.  
+- Základy CI/CD a verzování pomocí GitHub Actions.  
 
 ---
 
-## 🧭 Licence
+## 📜 Licence
 
 MIT – volně použitelné a upravitelné.
 
 ---
 
-> _Projekt v rané fázi – funguje základní automatické přepínání Wi-Fi ↔ Thunderbolt,  
-> postupně na tom stavím znalosti z DevOps._
+> _Projekt v rané fázi – základní automatické přepínání funguje.  
+> Slouží jako můj osobní sandbox pro zkoušení DevOps principů na reálném příkladu._
