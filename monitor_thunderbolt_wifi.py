@@ -1,227 +1,302 @@
 #!/usr/bin/env python3
-# ==============================================
-# MACOS AUTOMATICKÝ PŘEPÍNAČ WIFI A 10G ETHERNETU
-# ==============================================
-#
-# Co dělá:
-# ----------
-# - Pokud je aktivní jakékoliv "drátové" rozhraní (např. Thunderbolt 10G karta),
-#   skript vypne Wi-Fi, aby se používalo to rychlejší spojení.
-# - Pokud se drátové připojení odpojí, skript Wi-Fi zase zapne.
-# - Pokud jsi připojený k určité kancelářské Wi-Fi (např. "Marketing 5.0GHz"),
-#   skript zůstane aktivní i bez připojené karty (aby mohl reagovat, když ji zapojíš).
-# - Mimo kancelář (jiné Wi-Fi) usíná – tzv. idle režim, aby šetřil zdroje.
-#
-# Klíčové vlastnosti:
-# --------------------
-# ✅ Funguje pro jakékoliv Thunderbolt / Ethernet adaptéry, ne jen konkrétní model QNAP.
-# ✅ Automaticky najde rozhraní – nepotřebuješ znát jejich názvy.
-# ✅ Má "grace period" (okno po zapnutí Wi-Fi), kdy čeká, než se Wi-Fi připojí.
-# ✅ Nezahltí CPU (polluje každé 3 sekundy).
-# ✅ Vše funguje i při běhu jako LaunchDaemon.
-#
-# ==============================================
+# -*- coding: utf-8 -*-
 
-import subprocess
+"""
+macOS Wi-Fi Auto Toggle – Lukáš Františák
+-----------------------------------------
+Cíl: Pokud je aktivní kabel (QNAP Thunderbolt 10G), vypnout Wi-Fi.
+     Pokud kabel zmizí, Wi-Fi znovu zapnout.
+
+Zásadní body:
+- „Opravdu aktivní drát“ = ifconfig status: active + platná IPv4 (ne 169.254.*).
+- TB pseudo-rozhraní (Thunderbolt 1/2/Bridge) ignorujeme.
+- Lze omezit jen na tvoji QNAP kartu přes ALLOWED_WIRED_PORT_NAMES.
+- Rate limiting: nepřepínat dokola, dej čas Wi-Fi naběhnout (grace period).
+- Když Wi-Fi povolíme (po odpojení tb), nedáme hned idle – počkáme.
+
+Pozn.: Běží bez externích knihoven, jen subprocess.
+"""
+
+import os
+import re
 import time
-import sys
+import ipaddress
+import subprocess
 from typing import Dict, Optional, Tuple, List
 
-# ====== KONFIGURAČNÍ ČÁST ======
+# ------------- KONFIGURACE (přizpůsob si podle potřeby) ----------------------
 
-# Název kancelářské Wi-Fi sítě, kterou skript pozná a při níž zůstává aktivní
-OFFICE_SSIDS = ["Marketing 5.0GHz"]
+# SSID v kanceláři (jakmile je detekujeme, skript je „aktivní“):
+OFFICE_SSIDS = {
+    "Marketing 5.0GHz",
+    # případně další kancelářské SSID
+}
 
-# Interval, jak často skript kontroluje stav rozhraní (v sekundách)
-POLL_INTERVAL_SECONDS = 3
+# Volitelný allowlist: povolené názvy HW portů, které smíme považovat za „drát“.
+# Nech prázdné set(), pokud chceš autodetekovat jakýkoliv ethernet (USB LAN apod.).
+ALLOWED_WIRED_PORT_NAMES = {
+    "Thunderbolt Ethernet Slot 1",  # tvoje QNAP karta
+}
 
-# Jak dlouho má spát (neprovádět nic), pokud jsi mimo kancelář i bez připojené karty
+# Porty, které NIKDY nepočítáme (TB pseudo-rozhraní)
+TB_IGNORED_PORT_NAMES = {"Thunderbolt 1", "Thunderbolt 2", "Thunderbolt Bridge"}
+
+# Jak dlouho po posledním přepnutí nebudeme přepínat znovu (rate limiting)
+ACTION_COOLDOWN_SECONDS = 8
+
+# Po zapnutí Wi-Fi (po zjištění, že drát zmizel) čekáme, než se stačí připojit
+GRACE_AFTER_WIFI_ON_SECONDS = 20
+
+# „Idle“ spánek mimo kancelář a bez drátu
 IDLE_SLEEP_SECONDS = 60
 
-# Čas, po který musí být stav sítě stabilní, než skript zareaguje (ochrana proti výkyvům)
-DEBOUNCE_SEC = 2
-
-# Minimální odstup mezi dvěma přepnutími Wi-Fi (ochrana proti "cvakání")
-MIN_TOGGLE_GAP = 4
-
-# Jak dlouho po zapnutí Wi-Fi čekat, než se může přejít do idle (čas na připojení k síti)
-WIFI_GRACE_SEC = 20
-
-# Zapnout výpis informací do konzole (logy v terminálu)
+# Verbózní výstup
 VERBOSE = True
 
-# ====== CESTY K NÁSTROJŮM (kvůli běhu pod launchd) ======
-NETWORKSETUP = "/usr/sbin/networksetup"
-IFCONFIG = "/sbin/ifconfig"
 
-# ==============================================
-# Pomocné funkce – tady začíná logika
-# ==============================================
+# ------------- NÁSTROJOVÉ FUNKCE --------------------------------------------
 
 def run(cmd: List[str]) -> Tuple[int, str, str]:
-    """Spustí shell příkaz a vrátí (return_code, stdout, stderr)."""
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
+    """Spusť příkaz a vrať (rc, stdout, stderr)."""
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    return p.returncode, p.stdout.strip(), p.stderr.strip()
 
 
-def list_hardware_ports() -> Dict[str, str]:
-    """Vrátí slovník {Hardware Port -> Device}, např. {'Wi-Fi': 'en0', 'Thunderbolt Ethernet Slot 1': 'en10'}"""
-    rc, out, err = run([NETWORKSETUP, "-listallhardwareports"])
+def get_hw_ports() -> Dict[str, str]:
+    """
+    Vrátí mapu {HW Port Name -> device} z 'networksetup -listallhardwareports'.
+    Např. {'Wi-Fi': 'en0', 'Thunderbolt Ethernet Slot 1': 'en10', ...}
+    """
+    rc, out, err = run(["/usr/sbin/networksetup", "-listallhardwareports"])
+    ports: Dict[str, str] = {}
     if rc != 0:
-        raise RuntimeError(f"networksetup selhal: {err or out}")
-    mapping, current_port = {}, None
+        return ports
+
+    name, dev = None, None
     for line in out.splitlines():
-        s = line.strip()
-        if s.startswith("Hardware Port:"):
-            current_port = s.split("Hardware Port:", 1)[1].strip()
-        elif s.startswith("Device:") and current_port:
-            dev = s.split("Device:", 1)[1].strip()
-            mapping[current_port] = dev
-        elif s == "":
-            current_port = None
-    return mapping
+        if line.startswith("Hardware Port: "):
+            name = line.split("Hardware Port: ", 1)[1].strip()
+        elif line.startswith("Device: "):
+            dev = line.split("Device: ", 1)[1].strip()
+        elif line.strip() == "" and name and dev:
+            ports[name] = dev
+            name, dev = None, None
+
+    if name and dev:
+        ports[name] = dev
+
+    return ports
 
 
-def current_ssid(dev_or_service: str) -> str:
-    """Zjistí, ke které Wi-Fi síti je zařízení aktuálně připojené (SSID)."""
-    rc, out, _ = run([NETWORKSETUP, "-getairportnetwork", dev_or_service])
-    if rc == 0 and "Current Wi-Fi Network:" in out:
-        return out.split(":", 1)[1].strip()
-    return ""
-
-
-def is_interface_active(dev: str) -> bool:
-    """Vrátí True, pokud má síťové rozhraní (např. en10) status 'active'."""
-    rc, out, _ = run([IFCONFIG, dev])
+def get_wifi_service_name() -> Optional[str]:
+    """
+    Zkusí najít název Wi-Fi služby pro networksetup (někdy ‚Wi-Fi‘).
+    Pokud se nepodaří, vrací None a použijeme fallback přes device en0.
+    """
+    rc, out, err = run(["/usr/sbin/networksetup", "-listallnetworkservices"])
     if rc != 0:
-        return False
-    for line in out.splitlines():
-        if "status:" in line:
-            return "active" in line.lower()
-    return False
+        return None
 
-
-def wifi_power_is_on(dev_or_service: str) -> Optional[bool]:
-    """Zjistí, jestli je Wi-Fi zapnutá nebo vypnutá."""
-    rc, out, _ = run([NETWORKSETUP, "-getairportpower", dev_or_service])
-    if rc == 0 and ":" in out:
-        state = out.split(":", 1)[1].strip().lower()
-        if "on" in state:
-            return True
-        if "off" in state:
-            return False
+    services = [ln.strip() for ln in out.splitlines() if ln.strip() and not ln.startswith("An asterisk")]
+    # Dejte přednost přesnému „Wi-Fi“
+    for s in services:
+        if s.lower() in ("wi-fi", "wifi"):
+            return s
+    # Nebo něco, co obsahuje „wi-fi“
+    for s in services:
+        if "wi-fi" in s.lower() or "wifi" in s.lower():
+            return s
     return None
 
 
-def set_wifi(dev_or_service: str, enable: bool) -> bool:
-    """Zapne nebo vypne Wi-Fi."""
-    state = "on" if enable else "off"
-    rc, out, err = run([NETWORKSETUP, "-setairportpower", dev_or_service, state])
+def get_wifi_device(hw_ports: Dict[str, str]) -> Optional[str]:
+    """Najde device pro Wi-Fi (typicky en0)."""
+    # Nejprve přes HW porty
+    for name, dev in hw_ports.items():
+        if name.lower() in ("wi-fi", "wifi") or "wi-fi" in name.lower() or "wifi" in name.lower():
+            return dev
+    # Fallback: en0 bývá Wi-Fi
+    return "en0" if "en0" in hw_ports.values() or True else None
+
+
+def get_current_ssid(dev: str) -> Optional[str]:
+    """
+    Vrátí aktuální SSID pro airport device (např. en0).
+    Poznámka: `networksetup -getairportnetwork en0` funguje jen pro Wi-Fi.
+    """
+    rc, out, err = run(["/usr/sbin/networksetup", "-getairportnetwork", dev])
+    if rc != 0:
+        return None
+    # Output: "Current Wi-Fi Network: <SSID>"
+    m = re.search(r"Current Wi-Fi Network:\s*(.+)", out)
+    return m.group(1).strip() if m else None
+
+
+def wifi_set_power(service_or_dev: str, on: bool) -> bool:
+    """
+    Zapne/vypne Wi-Fi. Pokud máme service name (např. 'Wi-Fi'), použijeme ho.
+    Když ne, použijeme device (např. 'en0').
+    """
+    # networksetup přijme jak název služby, tak device
+    state = "on" if on else "off"
+    rc, out, err = run(["/usr/sbin/networksetup", "-setairportpower", service_or_dev, state])
     if VERBOSE:
-        print(f"[wifi] {dev_or_service} -> {state} (rc={rc}) {err or out}")
-    if rc == 0:
-        return True
-    # fallback: když networksetup selže, použij ifconfig
-    rc, out, err = run([IFCONFIG, dev_or_service, "up" if enable else "down"])
-    if VERBOSE:
-        print(f"[wifi-ifcfg] {dev_or_service} -> {'up' if enable else 'down'} (rc={rc}) {err or out}")
+        print(f"[wifi] {service_or_dev} -> {state} (rc={rc}) ", flush=True)
     return rc == 0
 
 
-# ==============================================
-# Hlavní logika skriptu
-# ==============================================
+def get_ipv4_addr(dev: str) -> Optional[str]:
+    """Vrátí IPv4 adresu daného enX, nebo None (když není)."""
+    rc, out, err = run(["/usr/sbin/ipconfig", "getifaddr", dev])
+    if rc != 0 or not out:
+        return None
+    return out.strip()
+
+
+def is_self_assigned(ip: str) -> bool:
+    """True, pokud je IP v self-assigned rozsahu 169.254.0.0/16 (link-local)."""
+    try:
+        return ipaddress.ip_address(ip).is_link_local
+    except Exception:
+        return False
+
+
+def if_status_active(dev: str) -> bool:
+    """True, pokud ifconfig hlásí status: active."""
+    rc, out, err = run(["/sbin/ifconfig", dev])
+    return ("status: active" in out) if rc == 0 else False
+
+
+def list_wired_candidates(hw_map: Dict[str, str]) -> List[Tuple[str, str]]:
+    """
+    Vrátí kandidáty (port_name, dev) pro drátová rozhraní:
+    - ignoruje Wi-Fi a TB pseudo-porty,
+    - pokud je definovaný ALLOWED_WIRED_PORT_NAMES, bere jen tyto porty,
+      jinak projde všechny ne-Wi-Fi ethernety (USB LAN apod.).
+    """
+    candidates: List[Tuple[str, str]] = []
+    for port_name, dev in hw_map.items():
+        lower = port_name.lower()
+        if port_name in TB_IGNORED_PORT_NAMES:
+            continue
+        if lower.startswith("wi-fi") or lower == "wifi":
+            continue
+        if ALLOWED_WIRED_PORT_NAMES and port_name not in ALLOWED_WIRED_PORT_NAMES:
+            continue
+        candidates.append((port_name, dev))
+    return candidates
+
+
+def wired_really_active(hw_map: Dict[str, str]) -> bool:
+    """
+    „Opravdu aktivní drát“ = ifconfig status: active + má IPv4, která není self-assigned (ne 169.254.*).
+    Tím odfiltrujeme TB pseudo rozhraní i USB hub bez kabelu/DHCP.
+    """
+    for port_name, dev in list_wired_candidates(hw_map):
+        if if_status_active(dev):
+            ip = get_ipv4_addr(dev)
+            if ip and not is_self_assigned(ip):
+                return True
+    return False
+
+
+# ------------- HLAVNÍ SMYČKA ------------------------------------------------
 
 def main():
-    # Získání seznamu všech síťových rozhraní
-    hw = list_hardware_ports()
+    last_switch_ts = 0.0             # kdy jsme naposledy přepínali (rate limit)
+    last_wifi_on_ts = 0.0            # kdy jsme naposledy zapnuli Wi-Fi (grace)
+    last_wifi_state: Optional[bool] = None   # None/True/False (Wi-Fi je zapnutá?)
+    grace_until = 0.0                # dokdy nedává smysl usínat (čekáme na připojení)
+
+    # Zjisti HW porty + Wi-Fi identifikátory
+    hw = get_hw_ports()
     if VERBOSE:
-        print("[info] HW porty:", hw)
+        print(f"[info] HW porty: {hw}", flush=True)
 
-    # Typicky: Wi-Fi bývá 'en0'
-    wifi_dev = hw.get("Wi-Fi", "en0")
-
-    # Všechna rozhraní začínající na "en" kromě Wi-Fi považujeme za „drátové“ (ethernet, thunderbolt, USB LAN…)
-    wired_candidates = sorted({d for d in hw.values() if d.startswith("en") and d != wifi_dev})
-    wired_candidates = [d for d in wired_candidates if not d.startswith("bridge")]
-
+    wifi_service = get_wifi_service_name()
+    wifi_dev = get_wifi_device(hw)
     if VERBOSE:
-        print("[info] Drátová rozhraní:", wired_candidates or "(nic nenalezeno)")
+        print(f"[info] Wi-Fi service: {wifi_service if wifi_service else '(nenalezeno – fallback)'}", flush=True)
+        print(f"[info] Wi-Fi device: {wifi_dev}", flush=True)
 
-    # Uložení výchozího stavu
-    last_toggle = 0.0
-    last_wifi_state = wifi_power_is_on(wifi_dev)
-    last_wired_seen: Optional[bool] = None
-    last_change = time.monotonic()
-    grace_until = 0.0  # do kdy trvá "grace period" po zapnutí Wi-Fi
+    # Helper pro zap/vyp Wi-Fi s rate limitingem a book-keeping
+    def ensure_wifi(desired_on: bool):
+        nonlocal last_switch_ts, last_wifi_state, last_wifi_on_ts, grace_until
 
-    # === Hlavní nekonečný cyklus ===
-    while True:
+        now = time.time()
+        if last_wifi_state is desired_on:
+            return  # nic neměníme
 
-        # 1️⃣ — Zjisti, jestli je nějaké drátové rozhraní aktivní
-        wired_active = any(is_interface_active(d) for d in wired_candidates)
-
-        # Pokud se stav drátu změnil (např. zapojil/odpojil se kabel), zapamatuj si čas změny
-        if last_wired_seen is None or wired_active != last_wired_seen:
-            last_wired_seen = wired_active
-            last_change = time.monotonic()
-
-        # Debounce — ignoruj krátkodobé výkyvy linku (např. při zapojování kabelu)
-        if time.monotonic() - last_change < DEBOUNCE_SEC:
-            time.sleep(POLL_INTERVAL_SECONDS)
-            continue
-
-        # 2️⃣ — Pokud není drát aktivní a Wi-Fi je vypnutá, zapni ji (recovery)
-        if not wired_active and (last_wifi_state is False):
+        # Rate limit – nepřepínat moc často
+        if (now - last_switch_ts) < ACTION_COOLDOWN_SECONDS:
             if VERBOSE:
-                print("[recover] Žádný drát → zapínám Wi-Fi a čekám na připojení…")
-            if set_wifi(wifi_dev, True):
-                last_wifi_state = True
-                last_toggle = time.monotonic()
-                grace_until = last_toggle + WIFI_GRACE_SEC  # zapamatuj si, že Wi-Fi má čas na připojení
+                print("[ratelimit] Přepínal jsem nedávno, čekám…", flush=True)
+            return
 
-        # 3️⃣ — Zjisti aktuální SSID (název Wi-Fi sítě)
-        ssid = current_ssid(wifi_dev) if (last_wifi_state is True) else ""
-        in_office = ssid in OFFICE_SSIDS if ssid else False  # jsme v kancelářské síti?
-        in_grace = time.monotonic() < grace_until            # jsme ještě ve fázi připojování?
+        target = wifi_service or wifi_dev
+        if not target:
+            if VERBOSE:
+                print("[err] Neznám Wi-Fi službu ani device – nemohu přepnout.", flush=True)
+            return
+
+        ok = wifi_set_power(target, desired_on)
+        if ok:
+            last_switch_ts = now
+            last_wifi_state = desired_on
+            if desired_on:
+                last_wifi_on_ts = now
+                # po zapnutí Wi-Fi necháme čas, aby naskočilo připojení
+                grace_until = now + GRACE_AFTER_WIFI_ON_SECONDS
+            if VERBOSE:
+                print(f"[action] Wi-Fi -> {'ON' if desired_on else 'OFF'}", flush=True)
+        else:
+            if VERBOSE:
+                print("[err] Přepnutí Wi-Fi selhalo.", flush=True)
+
+    # První odhad stavu Wi-Fi (pokud chceme)
+    # (nemusí být 100% přesný, ale stačí pro logiku – a stejně to udržíme idempotentní)
+    last_wifi_state = None  # necháme rozhodovat přes ensure_wifi
+
+    while True:
+        hw = get_hw_ports()
+        wired_active = wired_really_active(hw)
+
+        # SSID – když je Wi-Fi off, networksetup vrací nic
+        ssid = get_current_ssid(wifi_dev) if wifi_dev else None
+        in_office = bool(ssid and ssid in OFFICE_SSIDS)
+
+        now = time.time()
+        grace = now < grace_until
 
         if VERBOSE:
-            print(f"[gate] SSID='{ssid or '-'}' in_office={in_office} wired_active={wired_active} grace={in_grace}")
+            print(f"[gate] SSID='{ssid or '-'}' in_office={in_office} wired_active={wired_active} grace={grace}", flush=True)
 
-        # 4️⃣ — Pokud nejsme v kanceláři, žádný drát není aktivní a nejsme v "grace", přejdi do idle
-        if not in_office and not wired_active and not in_grace:
-            if VERBOSE:
-                print(f"[idle] Mimo kancelář a bez drátu → spím {IDLE_SLEEP_SECONDS}s")
-            time.sleep(IDLE_SLEEP_SECONDS)
-            continue
+        if wired_active:
+            # Máme validní drát → Wi-Fi vypnout
+            ensure_wifi(False)
 
-        # 5️⃣ — Hlavní rozhodovací logika: zapnout nebo vypnout Wi-Fi?
-        desired_wifi_on = not wired_active  # drát aktivní → Wi-Fi OFF, jinak ON
-        now = time.monotonic()
-        if last_wifi_state is None or desired_wifi_on != last_wifi_state:
-            # ochrana proti příliš častému přepínání
-            if now - last_toggle >= MIN_TOGGLE_GAP:
-                if VERBOSE:
-                    print(f"[action] wired_active={wired_active} → Wi-Fi {'ON' if desired_wifi_on else 'OFF'}")
-                if set_wifi(wifi_dev, desired_wifi_on):
-                    last_wifi_state = desired_wifi_on
-                    last_toggle = now
-                    # pokud jsme Wi-Fi zapli, přidej novou grace period
-                    if desired_wifi_on:
-                        grace_until = now + WIFI_GRACE_SEC
-                else:
-                    print("[warn] Nastavení Wi-Fi se nepovedlo – zkusím znovu později.")
-            else:
-                if VERBOSE:
-                    print("[ratelimit] Přepínal jsem nedávno, čekám…")
+        else:
+            # Drát není → Wi-Fi zapnout (aby ses připojil i mimo kancelář)
+            # (Tohle zajistí, že po vytažení TB se Wi-Fi skutečně rozsvítí.)
+            ensure_wifi(True)
 
-        # 6️⃣ — Počkej pár sekund a opakuj kontrolu
-        time.sleep(POLL_INTERVAL_SECONDS)
+            # Když zrovna Wi-Fi nahazujeme, dejme jí chvilku (grace period)
+            if grace:
+                time.sleep(2)
+                continue
 
+            # Když nejsme v kanceláři a není drát, můžeme si schrupnout
+            if not in_office:
+                print(f"[idle] Mimo kancelář a bez drátu → spím {IDLE_SLEEP_SECONDS}s", flush=True)
+                time.sleep(IDLE_SLEEP_SECONDS)
+                continue
 
-# ==============================================
-# Spuštění hlavní funkce
-# ==============================================
+        # Když jsme v kanclu nebo máme drát, běž rychleji (nižší latence na reakci)
+        time.sleep(2)
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[exit] Ukončeno uživatelem (Ctrl+C).")
