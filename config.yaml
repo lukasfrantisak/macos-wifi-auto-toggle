@@ -1,0 +1,97 @@
+# =============================================================================
+# KONFIGURACE: macOS Wi-Fi Auto Toggle
+# =============================================================================
+# Tento soubor obsahuje všechna nastavení pro automatické přepínání Wi-Fi.
+# Můžeš ho editovat bez nutnosti měnit samotný Python kód.
+
+# -----------------------------------------------------------------------------
+# SÍŤOVÁ ROZHRANÍ
+# -----------------------------------------------------------------------------
+network:
+  # Název hardware portu pro Thunderbolt QNAP kartu
+  # Zjistíme z výstupu: networksetup -listallhardwareports
+  thunderbolt_port_name: "Thunderbolt Ethernet Slot 1"
+  
+  # Device name pro Thunderbolt (mělo by být en10)
+  # Pokud necháš prázdné, skript ho automaticky najde podle port_name
+  thunderbolt_device: "en10"
+  
+  # Název Wi-Fi rozhraní v System Preferences
+  wifi_service_name: "Wi-Fi"
+  
+  # Wi-Fi device (typicky en0 na MacBooku)
+  wifi_device: "en0"
+
+# -----------------------------------------------------------------------------
+# KANCELÁŘSKÁ SÍŤ (pro budoucí použití)
+# -----------------------------------------------------------------------------
+office:
+  # Seznam SSID v kanceláři - když jsi připojen k těmto, skript běží normálně
+  # Mimo kancelář může přejít do sleep režimu (úspora CPU)
+  known_ssids:
+    - "Marketing 5.0GHz"
+    # - "Marketing 2.4GHz"  # přidej další podle potřeby
+  
+  # Pokud nejsme v kanceláři, jak dlouho spát mezi kontrolami (sekundy)
+  away_sleep_interval: 60
+  
+  # Povolit režim "mimo kancelář"? (false = běží pořád stejně)
+  enable_away_mode: false
+
+# -----------------------------------------------------------------------------
+# CHOVÁNÍ SKRIPTU
+# -----------------------------------------------------------------------------
+behavior:
+  # Jak často kontrolovat stav sítě (sekundy)
+  check_interval: 10
+  
+  # Při startu skriptu zkontrolovat a nastavit správný stav Wi-Fi?
+  # true = pokud je Thunderbolt připojen, hned vypne Wi-Fi
+  enforce_on_startup: true
+  
+  # Povolit notifikace do Notification Center?
+  enable_notifications: true
+  
+  # Zvuk pro notifikace (Submarine, Glass, Ping, nebo prázdné = bez zvuku)
+  notification_sound: "Submarine"
+
+# -----------------------------------------------------------------------------
+# LOGOVÁNÍ
+# -----------------------------------------------------------------------------
+logging:
+  # Úroveň logování: DEBUG, INFO, WARNING, ERROR
+  # DEBUG = hodně detailů (pro vývoj)
+  # INFO = normální provoz (doporučeno)
+  level: "INFO"
+  
+  # Kam logovat:
+  # - console: výstup do terminálu/konzole
+  # - file: do souboru v logs/
+  targets:
+    - "console"
+    - "file"
+  
+  # Soubor pro logy (pokud je 'file' v targets)
+  file_path: "logs/wifi-toggle.log"
+  
+  # Maximální velikost jednoho log souboru (MB)
+  # Při dosažení se vytvoří nový a starý se přejmenuje (.1, .2, atd.)
+  max_file_size_mb: 10
+  
+  # Kolik starých log souborů ponechat
+  backup_count: 3
+
+# -----------------------------------------------------------------------------
+# DEBUG & TESTOVÁNÍ
+# -----------------------------------------------------------------------------
+debug:
+  # Simulační režim - nespouští skutečné příkazy, jen loguje co by udělal
+  # Užitečné pro testování bez změn v systému
+  dry_run: false
+  
+  # Simulovat připojenou Thunderbolt kartu (i když fyzicky není)
+  simulate_wired: false
+  
+  # Simulovat stav Wi-Fi (on/off/none) - přepíše skutečný stav
+  # none = použije skutečný stav
+  simulate_wifi: null

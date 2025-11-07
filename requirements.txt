@@ -1,0 +1,15 @@
+
+# =============================================================================
+# PYTHON ZÁVISLOSTI pro macOS Wi-Fi Auto Toggle
+# =============================================================================
+# Instalace: pip3 install -r requirements.txt
+#
+# Projekt používá hlavně standardní knihovnu Pythonu,
+# takže závislostí je minimum.
+
+# YAML parser pro načítání config.yaml
+# PyYAML je stabilní a široce používaná knihovna
+pyyaml>=6.0
+
+# Pro budoucí Prometheus metriky (zatím nepoužito)
+# prometheus-client>=0.19.0
